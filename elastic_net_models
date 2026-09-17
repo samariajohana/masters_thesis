@@ -1,0 +1,100 @@
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import ElasticNet
+from sklearn.model_selection import train_test_split, validation_curve
+from sklearn.model_selection import GridSearchCV, KFold
+from sklearn.metrics import make_scorer, mean_squared_error, r2_score, mean_absolute_percentage_error,mean_absolute_error
+from sklearn.model_selection import RandomizedSearchCV, KFold, cross_val_score, LeaveOneOut, GridSearchCV, cross_val_predict
+from scipy.stats import spearmanr
+from scipy.stats.mstats import winsorize
+
+'''
+DataFrame of bacterial genera, already normalized, with feature filtering applied.
+Includes the variables Age, Study.Group, T1D_Status, and Gender.
+'''
+
+micro = pd.read_csv('genera_t1d_long_metadata.csv', index_col=0)
+micro.index.name = 'ID'
+
+# Import metabolomics data
+mtb_2 = pd.read_csv('mtb_set1_normalizado_listo.csv', index_col=0)
+
+# Sort the rows of the micro and mtb DataFrames so that samples are aligned
+index_comun = mtb_2.index.intersection(micro.index)
+mtb_2 = mtb_2.sort_index()
+micro = micro.sort_index()
+
+# Copy the processed metabolomics DataFrame and apply winsorization
+mtb_winsor = mtb_2.copy()
+for col in mtb_winsor.columns:
+    mtb_winsor[col] = winsorize(mtb_winsor[col], limits=[0.05, 0.05])
+
+X = micro.copy()  # Create a copy to avoid modifying the original DataFrame
+X.columns = X.columns.str.replace(r"[\[\]<>]", "", regex=True)  # Remove special characters
+
+
+def modelos_ENET(micro, mtb):
+    global modelos_enet_datosdiabetes_final
+
+    param_grid = {
+        'alpha': [0.001, 0.01, 0.1, 1, 10],
+        'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9],
+        "fit_intercept": [True, False],
+        "selection": ["cyclic", "random"]
+    }
+    
+    # 10-fold cross-validation
+    cv = KFold(n_splits=10, shuffle=True, random_state=42)
+    scoring = 'neg_mean_absolute_error'
+
+    resultados = []
+    
+    metabolitos = mtb.columns
+
+    for i, metabolito in enumerate(metabolitos): 
+        print(f"Processing {i+1} / {len(metabolitos)}: {metabolito}")
+        y = mtb[metabolito]
+    
+        # Define the Elastic Net model
+        enet_model = ElasticNet(random_state=42)
+    
+        # Define the grid search
+        grid_search = GridSearchCV(estimator=enet_model,
+                                   param_grid=param_grid, 
+                                   scoring=scoring, 
+                                   cv=cv, 
+                                   verbose=1, 
+                                   n_jobs=-1)
+        grid_search.fit(X, y)
+
+        best_model = grid_search.best_estimator_
+        coeficientes = best_model.coef_
+        coef_series = pd.Series(coeficientes, index=X.columns)
+        coef_sorted = coef_series.sort_values(key=abs, ascending=False)
+
+        y_pred = cross_val_predict(grid_search.best_estimator_, X, y, cv=cv, n_jobs=-1)
+
+        # Store hyperparameters and performance metrics for each metabolite
+        r2_scores = r2_score(y, y_pred)
+        spearman_corr, spearman_pval = spearmanr(y, y_pred)
+        mape = mean_absolute_percentage_error(y, y_pred)
+        mae = mean_absolute_error(y, y_pred)
+        
+        # Append the results to the list
+        resultados.append({'metabolito': metabolito, 
+                           'hiperparams': grid_search.best_params_, 
+                           'R2_enet': r2_scores, 
+                           'Spearman': spearman_corr, 
+                           'Spearman_pval': spearman_pval, 
+                           'mae': mae, 
+                           'mape': mape, 
+                           'y': y, 
+                           'y_pred': y_pred,
+                           'coeff': coef_sorted})
+    
+    # Create a DataFrame containing the results
+    modelos_enet_datosdiabetes_final = pd.DataFrame(resultados)
+    modelos_enet_datosdiabetes_final = modelos_enet_datosdiabetes_final.sort_values(by='Spearman', ascending=False)
+    modelos_enet_datosdiabetes_final.to_csv('modelos_enet_datosdiabetes_final_featfiltradas.csv')
+
+    return modelos_enet_datosdiabetes_final
